@@ -233,7 +233,7 @@ jobs:
         if: matrix.platform == 'android' && env.ANDROID_KEYSTORE_BASE64 == ''
         run: |
           flutter clean
-          flutter build apk --debug --flavor=prod \
+          flutter build apk --debug --flavor=dev \
             --target-platform android-arm64 \
             --dart-define=API_BASE_URL=${{ vars.API_BASE_URL }} \
             --dart-define=POSTHOG_HOST=${{ vars.POSTHOG_HOST }} \
