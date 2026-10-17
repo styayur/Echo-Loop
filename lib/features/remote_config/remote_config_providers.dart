@@ -9,26 +9,16 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../providers/package_info_provider.dart';
 import '../../services/app_logger.dart';
 import '../../services/refresh_coordinator.dart';
-import '../onboarding_survey/providers/onboarding_survey_provider.dart'
-    show sharedPreferencesProvider;
 import 'remote_config.dart';
+import 'remote_config_dependencies.dart';
 import 'remote_config_service.dart';
 
+export 'remote_config_dependencies.dart'
+    show initialRemoteConfigProvider, remoteConfigServiceProvider;
+
 const _remoteConfigRetryDelay = Duration(minutes: 5);
-
-final initialRemoteConfigProvider = Provider<RemoteConfig>(
-  (ref) => RemoteConfig.defaults,
-);
-
-final remoteConfigServiceProvider = Provider<RemoteConfigService>((ref) {
-  return RemoteConfigService.create(
-    prefs: ref.watch(sharedPreferencesProvider),
-    appVersion: readAppVersion(ref),
-  );
-});
 
 final remoteConfigProvider =
     StateNotifierProvider<RemoteConfigController, RemoteConfig>((ref) {
@@ -71,15 +61,29 @@ class RemoteConfigController extends StateNotifier<RemoteConfig> {
   final RefreshCoordinator<String, RemoteConfig> _refresh;
 
   Timer? _refreshTimer;
+  Future<void>? _refreshInFlight;
+  bool _forceRefreshQueued = false;
   bool _active = false;
 
   /// App 进入前台时启动 one-shot 刷新循环。
   ///
   /// [forceFirst] 仅用于冷启动后首轮后台刷新，确保网络环境切换（例如 VPN
   /// 地区变化）不会被旧缓存 TTL 长时间挡住；普通回前台仍走 TTL 节流。
-  void startPeriodicRefresh({bool forceFirst = false}) {
+  void startPeriodicRefresh({
+    bool forceFirst = false,
+    bool skipInitialRequest = false,
+  }) {
     _active = true;
+    if (skipInitialRequest) {
+      _scheduleNextRefresh();
+      return;
+    }
     unawaited(refreshIfStale(force: forceFirst));
+  }
+
+  /// 使用启动阶段已获取的配置，避免首帧后重复请求同一配置 API。
+  void adoptStartupConfig(RemoteConfig config) {
+    state = config;
   }
 
   /// App 进入后台或 controller 销毁时停止前台刷新循环。
@@ -88,8 +92,43 @@ class RemoteConfigController extends StateNotifier<RemoteConfig> {
     _cancelRefreshTimer();
   }
 
-  /// 按远程配置 TTL 刷新；并发调用复用同一个请求。
+  /// 按远程配置 TTL 刷新；普通并发调用复用当前请求，强制刷新会排队补发。
   Future<void> refreshIfStale({bool force = false}) async {
+    AppLogger.log(
+      'RemoteConfig',
+      'refresh requested force=$force '
+          'cachedCountry=${state.context.countryCode} '
+          'ttlSeconds=${state.ttlSeconds}',
+    );
+    final existingRefresh = _refreshInFlight;
+    if (existingRefresh != null) {
+      if (force) {
+        _forceRefreshQueued = true;
+        AppLogger.log(
+          'RemoteConfig',
+          'force refresh queued behind active request',
+        );
+      } else {
+        AppLogger.log('RemoteConfig', 'refresh joined active request');
+      }
+      await existingRefresh;
+      return;
+    }
+
+    final refresh = _refreshIfStale(force: force);
+    _refreshInFlight = refresh;
+    try {
+      await refresh;
+    } finally {
+      _refreshInFlight = null;
+      if (_forceRefreshQueued) {
+        _forceRefreshQueued = false;
+        await refreshIfStale(force: true);
+      }
+    }
+  }
+
+  Future<void> _refreshIfStale({required bool force}) async {
     try {
       final service = _readService();
       final run = await _refresh.run(
@@ -101,7 +140,14 @@ class RemoteConfigController extends StateNotifier<RemoteConfig> {
       );
       switch (run) {
         case RefreshCompleted<RemoteConfig>(:final result):
+          final previousCountryCode = state.context.countryCode;
           state = result;
+          AppLogger.log(
+            'RemoteConfig',
+            'state updated previousCountry=$previousCountryCode '
+                'country=${result.context.countryCode} '
+                'ttlSeconds=${result.ttlSeconds}',
+          );
         case RefreshThrottled<RemoteConfig>():
           AppLogger.log('RemoteConfig', 'refresh skipped: ttl not expired');
       }

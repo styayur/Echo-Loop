@@ -1,16 +1,102 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:echo_loop/config/regional_service_endpoints.dart';
 import 'package:echo_loop/features/remote_config/remote_config.dart';
 import 'package:echo_loop/features/remote_config/remote_config_providers.dart';
 import 'package:echo_loop/features/remote_config/remote_config_service.dart';
 import 'package:echo_loop/features/remote_config/remote_config_store.dart';
+import 'package:echo_loop/features/user_region/user_region_bootstrapper.dart';
+import 'package:echo_loop/features/user_region/user_region_providers.dart';
+import 'package:echo_loop/services/backend_dio.dart';
+import 'package:echo_loop/services/runtime_endpoint_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _MockDio extends Mock implements Dio {}
+
+class _QueuedResponse {
+  const _QueuedResponse({this.statusCode = 200, this.body, this.errorType});
+
+  final int statusCode;
+  final Object? body;
+  final DioExceptionType? errorType;
+}
+
+class _QueueAdapter implements HttpClientAdapter {
+  _QueueAdapter(this._responses);
+
+  final List<_QueuedResponse> _responses;
+  final requestUris = <Uri>[];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requestUris.add(options.uri);
+    final response = _responses.removeAt(0);
+    final errorType = response.errorType;
+    if (errorType != null) {
+      throw DioException(
+        requestOptions: options,
+        type: errorType,
+        error: StateError('simulated transport failure'),
+      );
+    }
+    return ResponseBody.fromString(
+      jsonEncode(response.body),
+      response.statusCode,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _CancellationAdapter implements HttpClientAdapter {
+  final cancelled = Completer<void>();
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final cancellation = cancelFuture;
+    if (cancellation == null) {
+      throw StateError('expected a cancellable request');
+    }
+    await cancellation;
+    cancelled.complete();
+    throw DioException(requestOptions: options, type: DioExceptionType.cancel);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+Map<String, Object?> _remoteConfigBody(String countryCode) => {
+  'version': RemoteConfig.currentVersion,
+  'ttlSeconds': 120,
+  'context': {'countryCode': countryCode},
+  'features': RemoteConfigFeatures.defaults.toJson(),
+};
+
+RemoteConfig _config(String countryCode) => RemoteConfig(
+  version: RemoteConfig.currentVersion,
+  ttlSeconds: 120,
+  context: RemoteConfigContext(countryCode: countryCode),
+  features: RemoteConfigFeatures.defaults,
+);
 
 void main() {
   Response<Object?> response(Object? data) => Response<Object?>(
@@ -54,6 +140,30 @@ void main() {
       expect(config.isEnabled(RemoteFeature.aiChatAssistant), isFalse);
       expect(config.transcriptionLimits.maxDurationSeconds, 3600);
       expect(config.transcriptionLimits.maxUploadBytes, 104857600);
+    });
+
+    test('countryCode 缺失、无效或 unknown 时保留为未知', () {
+      expect(RemoteConfig.fromJson({}).context.countryCode, isNull);
+
+      final contexts = <Map<String, Object?>>[
+        {},
+        {'countryCode': null},
+        {'countryCode': 123},
+        {'countryCode': ''},
+        {'countryCode': '  '},
+        {'countryCode': 'unknown'},
+        {'countryCode': 'UNKNOWN'},
+      ];
+
+      for (final context in contexts) {
+        final config = RemoteConfig.fromJson({'context': context});
+        expect(config.context.countryCode, isNull, reason: '$context');
+      }
+
+      final validCountry = RemoteConfig.fromJson({
+        'context': {'countryCode': ' CN '},
+      });
+      expect(validCountry.context.countryCode, 'CN');
     });
 
     test('缺字段和未知版本回退本地默认，网盘导入和 AI 聊天入口默认开启', () {
@@ -315,7 +425,6 @@ void main() {
           },
         }),
       );
-
       final service = RemoteConfigService(
         dio: dio,
         store: store,
@@ -333,6 +442,186 @@ void main() {
         ),
       ).called(1);
     });
+
+    test('指定 base URL 请求不经过运行时地区改写', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final adapter = _QueueAdapter([
+        _QueuedResponse(body: _remoteConfigBody('CN')),
+      ]);
+      final dio = createBackendDio(baseUrl: 'https://default.example')
+        ..httpClientAdapter = adapter;
+      addTearDown(dio.close);
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+
+      final config = await service.fetchRemoteFromBaseUrl(
+        'https://china.example/',
+        timeout: const Duration(seconds: 5),
+      );
+
+      expect(adapter.requestUris.single.host, 'china.example');
+      expect(config.context.countryCode, 'CN');
+    });
+
+    test('启动请求超时会取消正在执行的 HTTP 请求', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final adapter = _CancellationAdapter();
+      final dio = createBackendDio(baseUrl: 'https://default.example')
+        ..httpClientAdapter = adapter;
+      addTearDown(dio.close);
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+
+      await expectLater(
+        service.fetchRemoteFromBaseUrl(
+          'https://china.example',
+          timeout: const Duration(milliseconds: 20),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      await adapter.cancelled.future;
+    });
+
+    test(
+      '503 from the selected China API does not retry another region',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final router = RuntimeEndpointRouter(
+          endpoints: const RegionalServiceEndpoints(
+            globalApiBaseUrl: 'https://global-api.example',
+            chinaApiBaseUrl: 'https://china-api.example',
+            globalModelCdnBaseUrl: 'https://global-cdn.example',
+            chinaModelCdnBaseUrl: 'https://china-cdn.example',
+          ),
+        )..updateFromUserRegion(isChinaUser: true);
+        final adapter = _QueueAdapter([
+          _QueuedResponse(statusCode: 503, body: {'error': 'unavailable'}),
+        ]);
+        final dio = createBackendDio(
+          baseUrl: 'https://global-api.example',
+          endpointRouter: router,
+        )..httpClientAdapter = adapter;
+        addTearDown(dio.close);
+        final service = RemoteConfigService(
+          dio: dio,
+          store: RemoteConfigStore(prefs),
+        );
+
+        await expectLater(service.fetchRemote(), throwsA(isA<DioException>()));
+
+        expect(adapter.requestUris.map((uri) => uri.host), [
+          'china-api.example',
+        ]);
+        expect(router.apiRegion, ServiceEndpointRegion.china);
+      },
+    );
+
+    test('client errors do not fall back to the alternate API', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final router = RuntimeEndpointRouter(
+        endpoints: const RegionalServiceEndpoints(
+          globalApiBaseUrl: 'https://global-api.example',
+          chinaApiBaseUrl: 'https://china-api.example',
+          globalModelCdnBaseUrl: 'https://global-cdn.example',
+          chinaModelCdnBaseUrl: 'https://china-cdn.example',
+        ),
+      )..updateFromUserRegion(isChinaUser: true);
+      final adapter = _QueueAdapter([
+        _QueuedResponse(statusCode: 401, body: {'error': 'unauthorized'}),
+      ]);
+      final dio = createBackendDio(
+        baseUrl: 'https://global-api.example',
+        endpointRouter: router,
+      )..httpClientAdapter = adapter;
+      addTearDown(dio.close);
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+
+      await expectLater(service.fetchRemote(), throwsA(isA<DioException>()));
+
+      expect(adapter.requestUris, hasLength(1));
+      expect(adapter.requestUris.single.host, 'china-api.example');
+      expect(router.apiRegion, ServiceEndpointRegion.china);
+    });
+
+    test('transport failure does not retry the alternate API', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final router = RuntimeEndpointRouter(
+        endpoints: const RegionalServiceEndpoints(
+          globalApiBaseUrl: 'https://global-api.example',
+          chinaApiBaseUrl: 'https://china-api.example',
+          globalModelCdnBaseUrl: 'https://global-cdn.example',
+          chinaModelCdnBaseUrl: 'https://china-cdn.example',
+        ),
+      )..updateFromUserRegion(isChinaUser: true);
+      final adapter = _QueueAdapter([
+        _QueuedResponse(errorType: DioExceptionType.connectionError),
+      ]);
+      final dio = createBackendDio(
+        baseUrl: 'https://global-api.example',
+        endpointRouter: router,
+      )..httpClientAdapter = adapter;
+      addTearDown(dio.close);
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+
+      await expectLater(service.fetchRemote(), throwsA(isA<DioException>()));
+
+      expect(adapter.requestUris.map((uri) => uri.host), ['china-api.example']);
+      expect(router.apiRegion, ServiceEndpointRegion.china);
+    });
+
+    test(
+      'selected API failure preserves the cached config without crossing regions',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final store = RemoteConfigStore(prefs);
+        await store.write(_config('US'), now: DateTime(2026, 1));
+        final router = RuntimeEndpointRouter(
+          endpoints: const RegionalServiceEndpoints(
+            globalApiBaseUrl: 'https://global-api.example',
+            chinaApiBaseUrl: 'https://china-api.example',
+            globalModelCdnBaseUrl: 'https://global-cdn.example',
+            chinaModelCdnBaseUrl: 'https://china-cdn.example',
+          ),
+        )..updateFromUserRegion(isChinaUser: true);
+        final adapter = _QueueAdapter([
+          _QueuedResponse(statusCode: 503, body: {'error': 'unavailable'}),
+        ]);
+        final dio = createBackendDio(
+          baseUrl: 'https://global-api.example',
+          endpointRouter: router,
+        )..httpClientAdapter = adapter;
+        addTearDown(dio.close);
+        final service = RemoteConfigService(
+          dio: dio,
+          store: store,
+          now: () => DateTime(2026, 1, 1, 0, 3),
+        );
+
+        final config = await service.load();
+
+        expect(adapter.requestUris, hasLength(1));
+        expect(adapter.requestUris.single.host, 'china-api.example');
+        expect(router.apiRegion, ServiceEndpointRegion.china);
+        expect(config.context.countryCode, 'US');
+        expect(store.readCached(allowExpired: true)?.context.countryCode, 'US');
+      },
+    );
   });
 
   group('RemoteConfigController', () {
@@ -447,6 +736,34 @@ void main() {
       controller.dispose();
     });
 
+    test('启动配置被采用后可跳过重复首轮请求', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final dio = _MockDio();
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+      final controller = RemoteConfigController(
+        readService: () => service,
+        initialConfig: RemoteConfig.defaults,
+      );
+      final startupConfig = _config('CN');
+
+      controller.adoptStartupConfig(startupConfig);
+      controller.startPeriodicRefresh(skipInitialRequest: true);
+      await pumpEventQueue();
+
+      expect(controller.state, startupConfig);
+      verifyNever(
+        () => dio.get<Object?>(
+          '/api/v1/client/config',
+          queryParameters: any(named: 'queryParameters'),
+        ),
+      );
+      controller.dispose();
+    });
+
     test('TTL 过期后刷新成功会更新 feature provider', () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -503,6 +820,58 @@ void main() {
         ),
         isTrue,
       );
+    });
+
+    test('Client Config 国家码不会覆盖系统 Region 路由', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final router = RuntimeEndpointRouter(
+        endpoints: const RegionalServiceEndpoints(
+          globalApiBaseUrl: 'https://global-api.example',
+          chinaApiBaseUrl: 'https://china-api.example',
+          globalModelCdnBaseUrl: 'https://global-cdn.example',
+          chinaModelCdnBaseUrl: 'https://china-cdn.example',
+        ),
+      )..updateFromUserRegion(isChinaUser: false);
+      final adapter = _QueueAdapter([
+        _QueuedResponse(body: _remoteConfigBody('CN')),
+      ]);
+      final dio = createBackendDio(
+        baseUrl: 'https://global-api.example',
+        endpointRouter: router,
+      )..httpClientAdapter = adapter;
+      addTearDown(dio.close);
+      final service = RemoteConfigService(
+        dio: dio,
+        store: RemoteConfigStore(prefs),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          initialRemoteConfigProvider.overrideWithValue(_config('US')),
+          remoteConfigServiceProvider.overrideWithValue(service),
+          userRegionDeviceCountryCodeProvider.overrideWithValue(() => 'US'),
+          userRegionBootstrapProvider.overrideWith(
+            (ref) => Completer<UserRegionBootstrapResult>().future,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(container.read(isChinaUserProvider), isFalse);
+      expect(router.apiRegion, ServiceEndpointRegion.global);
+      expect(router.modelCdnRegion, ServiceEndpointRegion.global);
+
+      await container
+          .read(remoteConfigProvider.notifier)
+          .refreshIfStale(force: true);
+
+      expect(container.read(remoteConfigProvider).context.countryCode, 'CN');
+      expect(container.read(isChinaUserProvider), isFalse);
+      expect(adapter.requestUris.map((uri) => uri.host), [
+        'global-api.example',
+      ]);
+      expect(router.apiRegion, ServiceEndpointRegion.global);
+      expect(router.modelCdnRegion, ServiceEndpointRegion.global);
     });
 
     test('transcription limits provider 暴露远程限制值', () {

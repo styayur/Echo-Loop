@@ -195,6 +195,7 @@
   "practiceControlModeManual": "Manual",
   "player": "Player",
   "account": "Account",
+  "chinaRoutingIndicatorTooltip": "Using China region service routing",
   "settings": "Settings",
   "addAudio": "Add Audio",
   "noAudioYet": "No audio files yet",
@@ -449,6 +450,13 @@
     }
   },
   "communityCollectionUnknownAuthor": "Unknown author",
+  "communityCollectionUploader": "Uploaded by {nickname}",
+  "@communityCollectionUploader": {
+    "placeholders": {
+      "nickname": {"type": "String"}
+    }
+  },
+  "communityCollectionUnknownUploader": "Unknown uploader",
   "communityCollectionUnknownPublishDate": "Date unknown",
   "communityCollectionCover": "{name} cover",
   "@communityCollectionCover": {
@@ -1359,10 +1367,7 @@
   "@upcomingReviewsSummary": {
     "placeholders": { "count": { "type": "int" } }
   },
-  "firstStudySection": "First Round ({count})",
-  "@firstStudySection": {
-    "placeholders": { "count": { "type": "int" } }
-  },
+  "recommendedForYou": "Recommended for you",
   "completedSection": "Completed Materials ({count})",
   "@completedSection": {
     "placeholders": { "count": { "type": "int" } }
@@ -2120,8 +2125,8 @@
   },
   "discoverPodcastTitle": "Curated Podcasts",
   "discoverPodcastEmpty": "No curated podcasts yet",
-  "podcastCatalogSignInRequiredMessage": "Sign in to add curated podcasts to My Collections and keep learning future episodes.",
-  "podcastCatalogSubscribeFailed": "Failed to add. Some RSS feeds or Apple Podcasts may be unavailable on the current network. Try again later or switch networks.",
+  "podcastSignInRequiredMessage": "Sign in to add curated podcasts to My Collections and keep learning future episodes.",
+  "podcastPreviewSubscribeFailed": "Failed to add. Some RSS feeds or Apple Podcasts may be unavailable on the current network. Try again later or switch networks.",
   "podcastEnrollNeededTitle": "Add Podcast First",
   "podcastEnrollNeededMessage": "Add this podcast to My Collections, then you can download and learn this episode.",
   "podcastPreviewNetworkFailed": "Could not fetch podcast content. Apple Podcasts or some RSS feeds may be unavailable on the current network. Try again later or switch networks.",
@@ -2594,6 +2599,7 @@
   "dictionarySources": "Dictionary Sources",
   "dictionarySourcesDescription": "Disabled dictionaries won't appear in the lookup switcher",
   "dictionaryAutoSpeakOnLookup": "Auto-play Pronunciation",
+  "dictionaryAdFilterTitle": "Block ads in web dictionaries",
   "dictSourceLocal": "Local Dictionary",
   "dictSourceAi": "AI Dictionary",
   "dictSourceCambridge": "Cambridge",

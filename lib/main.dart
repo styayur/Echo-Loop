@@ -41,18 +41,19 @@ import 'services/app_update_migration.dart';
 import 'services/media_kit_debug_initializer.dart';
 import 'services/user_id_service.dart';
 import 'widgets/app_notice_presenter.dart';
+import 'widgets/app_startup_gate.dart';
 import 'features/community_collections/data/trigger_community_sync.dart';
 import 'features/community_collections/download/community_download_notifier.dart';
-import 'features/podcast/data/podcast_catalog_service.dart';
-import 'features/podcast/data/trigger_podcast_catalog_refresh.dart';
 import 'features/onboarding_survey/data/onboarding_survey_storage.dart';
 import 'features/onboarding_survey/providers/onboarding_survey_provider.dart';
 import 'features/auth/providers/auth_providers.dart';
 import 'features/remote_config/remote_config_providers.dart';
 import 'features/remote_config/remote_config_service.dart';
+import 'features/user_region/user_region_providers.dart';
 import 'features/subscription/providers/subscription_controller.dart';
 import 'features/subscription/providers/subscription_plans_provider.dart';
 import 'features/subscription/services/paddle_deep_link_handler.dart';
+import 'features/user_region/user_region_bootstrapper.dart';
 
 void main() async {
   final startupTrace = StartupTrace();
@@ -230,6 +231,8 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
   StreamSubscription<NotificationIntent>? _intentSubscription;
   ProviderSubscription<AsyncValue<Session?>>? _authSessionSubscription;
   ProviderSubscription<AsyncValue<StartupReport>>? _localStartupSubscription;
+  ProviderSubscription<AsyncValue<UserRegionBootstrapResult>>?
+  _userRegionStartupSubscription;
   ProviderSubscription<AsyncValue<ThirdPartyStartupReport>>?
   _thirdPartyStartupSubscription;
   AppDeepLinkRouter? _appDeepLinkRouter;
@@ -249,6 +252,19 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
       },
       fireImmediately: true,
     );
+    _userRegionStartupSubscription = ref
+        .listenManual<AsyncValue<UserRegionBootstrapResult>>(
+          userRegionBootstrapProvider,
+          (_, next) {
+            final result = next.valueOrNull;
+            if (result == null) return;
+            ref
+                .read(remoteConfigProvider.notifier)
+                .adoptStartupConfig(result.remoteConfig);
+            unawaited(_startAfterLocalDataReady());
+          },
+          fireImmediately: true,
+        );
     _thirdPartyStartupSubscription = ref
         .listenManual<AsyncValue<ThirdPartyStartupReport>>(
           thirdPartyStartupProvider,
@@ -291,6 +307,10 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
   /// 依次启动所有不属于首帧关键路径的本地预热任务。
   Future<void> _startAfterLocalDataReady() async {
     if (!mounted || _didStartLocalEffects) return;
+    if (!ref.read(localStartupProvider).hasValue ||
+        !ref.read(userRegionBootstrapProvider).hasValue) {
+      return;
+    }
     _didStartLocalEffects = true;
     activeStartupTrace?.mark('main_navigation_released');
 
@@ -300,20 +320,12 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
     ref.read(dictionaryProvider);
     ref.read(pronunciationLibraryProvider);
 
-    // Podcast catalog 与社区合集同步相互独立；先恢复本地精选缓存，再后台刷新，
-    // 避免社区合集 v2 的同步结果改变原有 Podcast 发现页行为。
-    unawaited(
-      ref.read(podcastCatalogServiceProvider).loadCachedCatalog().then((_) {
-        if (mounted) ref.invalidate(cachedPodcastCatalogProvider);
-      }),
-    );
-
     final bridge = ref.read(notificationTapRouterBridgeProvider);
     _intentSubscription = bridge.intents.listen(_handleNotificationIntent);
     final pendingIntent = bridge.takePendingIntent();
     if (pendingIntent != null) _handleNotificationIntent(pendingIntent);
 
-    Future.delayed(const Duration(seconds: 3), _triggerBackgroundSync);
+    Future.delayed(const Duration(seconds: 3), _triggerCommunitySync);
   }
 
   /// 业务内容提交后再预热，不让原生播放器依赖阻塞进入学习页。
@@ -397,6 +409,7 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
     }
     _authSessionSubscription?.close();
     _localStartupSubscription?.close();
+    _userRegionStartupSubscription?.close();
     _thirdPartyStartupSubscription?.close();
     _showcase.unregister();
     super.dispose();
@@ -413,7 +426,7 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
     switch (state) {
       case AppLifecycleState.resumed:
         if (ref.read(localStartupProvider).hasValue) {
-          _triggerBackgroundSync();
+          _triggerCommunitySync();
         }
         // 回前台时条件重对账订阅权益（E8）。单一来源下每次刷新都是真实后端请求
         // （不再有 RC SDK 客户端缓存兜着），且退款/退订分歧主要靠 E6/E7 在后端
@@ -448,16 +461,6 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
     unawaited(
       triggerCommunitySync(ref, force: force).then((outcome) {
         AppLogger.log('main', 'CommunitySync outcome=${outcome.runtimeType}');
-      }),
-    );
-  }
-
-  /// 前台/启动后台刷新两个互不依赖的公共内容源；任一失败都不能阻塞另一方。
-  void _triggerBackgroundSync({bool force = false}) {
-    _triggerCommunitySync(force: force);
-    unawaited(
-      triggerPodcastCatalogRefresh(ref, force: force).then((outcome) {
-        AppLogger.log('main', 'PodcastCatalog outcome=${outcome?.runtimeType}');
       }),
     );
   }
@@ -501,8 +504,9 @@ class _EchoLoopAppState extends ConsumerState<EchoLoopApp>
         GlobalCupertinoLocalizations.delegate,
       ],
       routerConfig: router,
-      builder: (context, child) =>
-          AppNoticePresenter(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => AppStartupGate(
+        child: AppNoticePresenter(child: child ?? const SizedBox.shrink()),
+      ),
       scaffoldMessengerKey: communityDownloadScaffoldMessengerKey,
     );
   }

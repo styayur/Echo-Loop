@@ -379,6 +379,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get account => 'Account';
 
   @override
+  String get chinaRoutingIndicatorTooltip =>
+      'Using China region service routing';
+
+  @override
   String get settings => 'Settings';
 
   @override
@@ -881,6 +885,14 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get communityCollectionUnknownAuthor => 'Unknown author';
+
+  @override
+  String communityCollectionUploader(String nickname) {
+    return 'Uploaded by $nickname';
+  }
+
+  @override
+  String get communityCollectionUnknownUploader => 'Unknown uploader';
 
   @override
   String get communityCollectionUnknownPublishDate => 'Date unknown';
@@ -2447,9 +2459,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String firstStudySection(int count) {
-    return 'First Round ($count)';
-  }
+  String get recommendedForYou => 'Recommended for you';
 
   @override
   String completedSection(int count) {
@@ -3976,11 +3986,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get discoverPodcastEmpty => 'No curated podcasts yet';
 
   @override
-  String get podcastCatalogSignInRequiredMessage =>
+  String get podcastSignInRequiredMessage =>
       'Sign in to add curated podcasts to My Collections and keep learning future episodes.';
 
   @override
-  String get podcastCatalogSubscribeFailed =>
+  String get podcastPreviewSubscribeFailed =>
       'Failed to add. Some RSS feeds or Apple Podcasts may be unavailable on the current network. Try again later or switch networks.';
 
   @override
@@ -5220,6 +5230,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get dictionaryAutoSpeakOnLookup => 'Auto-play Pronunciation';
+
+  @override
+  String get dictionaryAdFilterTitle => 'Block ads in web dictionaries';
 
   @override
   String get dictSourceLocal => 'Local Dictionary';

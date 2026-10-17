@@ -362,6 +362,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get account => '账户';
 
   @override
+  String get chinaRoutingIndicatorTooltip => '当前使用中国区服务路由';
+
+  @override
   String get settings => '设置';
 
   @override
@@ -856,6 +859,14 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get communityCollectionUnknownAuthor => '未知作者';
+
+  @override
+  String communityCollectionUploader(String nickname) {
+    return '上传者：$nickname';
+  }
+
+  @override
+  String get communityCollectionUnknownUploader => '未知上传者';
 
   @override
   String get communityCollectionUnknownPublishDate => '日期未知';
@@ -2343,9 +2354,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String firstStudySection(int count) {
-    return '首次学习 ($count)';
-  }
+  String get recommendedForYou => '为你推荐';
 
   @override
   String completedSection(int count) {
@@ -3803,11 +3812,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get discoverPodcastEmpty => '暂无精选播客';
 
   @override
-  String get podcastCatalogSignInRequiredMessage =>
-      '登录后可以将精选播客添加到我的合集，并继续学习后续单集。';
+  String get podcastSignInRequiredMessage => '登录后可以将精选播客添加到我的合集，并继续学习后续单集。';
 
   @override
-  String get podcastCatalogSubscribeFailed =>
+  String get podcastPreviewSubscribeFailed =>
       '添加失败。部分 RSS 或 Apple Podcasts 在当前网络环境下可能不可访问，请稍后重试或切换网络。';
 
   @override
@@ -4980,6 +4988,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get dictionaryAutoSpeakOnLookup => '查词时自动播放发音';
+
+  @override
+  String get dictionaryAdFilterTitle => '屏蔽网页词典广告';
 
   @override
   String get dictSourceLocal => '本地词典';

@@ -734,6 +734,12 @@ abstract class AppLocalizations {
   /// **'Account'**
   String get account;
 
+  /// No description provided for @chinaRoutingIndicatorTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Using China region service routing'**
+  String get chinaRoutingIndicatorTooltip;
+
   /// No description provided for @settings.
   ///
   /// In en, this message translates to:
@@ -1657,6 +1663,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Unknown author'**
   String get communityCollectionUnknownAuthor;
+
+  /// No description provided for @communityCollectionUploader.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded by {nickname}'**
+  String communityCollectionUploader(String nickname);
+
+  /// No description provided for @communityCollectionUnknownUploader.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown uploader'**
+  String get communityCollectionUnknownUploader;
 
   /// No description provided for @communityCollectionUnknownPublishDate.
   ///
@@ -4274,11 +4292,11 @@ abstract class AppLocalizations {
   /// **'{count} review tasks will unlock later'**
   String upcomingReviewsSummary(int count);
 
-  /// No description provided for @firstStudySection.
+  /// No description provided for @recommendedForYou.
   ///
   /// In en, this message translates to:
-  /// **'First Round ({count})'**
-  String firstStudySection(int count);
+  /// **'Recommended for you'**
+  String get recommendedForYou;
 
   /// No description provided for @completedSection.
   ///
@@ -6932,17 +6950,17 @@ abstract class AppLocalizations {
   /// **'No curated podcasts yet'**
   String get discoverPodcastEmpty;
 
-  /// No description provided for @podcastCatalogSignInRequiredMessage.
+  /// No description provided for @podcastSignInRequiredMessage.
   ///
   /// In en, this message translates to:
   /// **'Sign in to add curated podcasts to My Collections and keep learning future episodes.'**
-  String get podcastCatalogSignInRequiredMessage;
+  String get podcastSignInRequiredMessage;
 
-  /// No description provided for @podcastCatalogSubscribeFailed.
+  /// No description provided for @podcastPreviewSubscribeFailed.
   ///
   /// In en, this message translates to:
   /// **'Failed to add. Some RSS feeds or Apple Podcasts may be unavailable on the current network. Try again later or switch networks.'**
-  String get podcastCatalogSubscribeFailed;
+  String get podcastPreviewSubscribeFailed;
 
   /// No description provided for @podcastEnrollNeededTitle.
   ///
@@ -9145,6 +9163,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Auto-play Pronunciation'**
   String get dictionaryAutoSpeakOnLookup;
+
+  /// No description provided for @dictionaryAdFilterTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Block ads in web dictionaries'**
+  String get dictionaryAdFilterTitle;
 
   /// No description provided for @dictSourceLocal.
   ///
