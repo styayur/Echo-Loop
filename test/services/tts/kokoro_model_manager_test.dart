@@ -7,16 +7,19 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:echo_loop/config/regional_service_endpoints.dart';
 import 'package:echo_loop/services/reliable_http_downloader.dart';
+import 'package:echo_loop/services/runtime_endpoint_router.dart';
 import 'package:echo_loop/services/tts/kokoro_model_manager.dart';
 import 'package:echo_loop/services/tts/kokoro_model_catalog.dart';
 
 /// 返回预置归档字节的 mock dio adapter（按 URL 末段匹配）。
 class _MockArchiveAdapter implements HttpClientAdapter {
-  _MockArchiveAdapter(this.payload);
+  _MockArchiveAdapter(this.payload, {this.requestUris});
 
   /// 末段文件名 → 字节；命中返回 200，否则 404。
   final List<int> payload;
+  final List<Uri>? requestUris;
 
   @override
   Future<ResponseBody> fetch(
@@ -24,6 +27,7 @@ class _MockArchiveAdapter implements HttpClientAdapter {
     Stream<List<int>>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    requestUris?.add(options.uri);
     if (!options.path.endsWith('.tar.gz')) {
       return ResponseBody(const Stream.empty(), 404, headers: {});
     }
@@ -38,6 +42,18 @@ class _MockArchiveAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+Future<RuntimeEndpointRouter> _routerWithChinaCdn() async {
+  final router = RuntimeEndpointRouter(
+    endpoints: const RegionalServiceEndpoints(
+      globalApiBaseUrl: 'https://global-api.example',
+      chinaApiBaseUrl: 'https://china-api.example',
+      globalModelCdnBaseUrl: 'https://global-cdn.example',
+      chinaModelCdnBaseUrl: 'https://china-cdn.example',
+    ),
+  );
+  return router..updateFromUserRegion(isChinaUser: true);
 }
 
 /// 对任何请求都返回 404 的 mock adapter，用于模拟归档下载的网络失败。
@@ -111,12 +127,23 @@ List<int> _buildArchive({bool includeDataDir = true}) {
   return GZipEncoder().encodeBytes(tar);
 }
 
-KokoroModelManager _manager(Directory root, List<int> archive, {String? sha}) {
+KokoroModelManager _manager(
+  Directory root,
+  List<int> archive, {
+  String? sha,
+  String? downloadUrl,
+  RuntimeEndpointRouter? endpointRouter,
+  List<Uri>? requestUris,
+}) {
   final dio = Dio();
-  dio.httpClientAdapter = _MockArchiveAdapter(archive);
+  dio.httpClientAdapter = _MockArchiveAdapter(
+    archive,
+    requestUris: requestUris,
+  );
   return KokoroModelManager(
     dio: dio,
-    baseUrlOverride: 'http://mock.local',
+    baseUrlOverride: endpointRouter == null ? 'http://mock.local' : null,
+    endpointRouter: endpointRouter,
     spec: KokoroModelSpec(
       variant: KokoroModelVariant.int8,
       id: 'test-model',
@@ -124,12 +151,14 @@ KokoroModelManager _manager(Directory root, List<int> archive, {String? sha}) {
       sha256: sha ?? sha256.convert(archive).toString(),
       modelFileName: 'model.int8.onnx',
       estimatedDownloadBytes: 1024,
+      downloadUrl: downloadUrl,
     ),
     modelsRootResolver: () async => root.path,
   );
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory root;
 
   setUp(() async {
@@ -142,11 +171,19 @@ void main() {
 
   test('下载 → 校验 → 解包：关键文件就位且 isModelDownloaded 为真', () async {
     final archive = _buildArchive();
-    final manager = _manager(root, archive);
+    final requestedUris = <Uri>[];
+    final manager = _manager(
+      root,
+      archive,
+      endpointRouter: await _routerWithChinaCdn(),
+      requestUris: requestedUris,
+    );
 
     final progresses = <double>[];
     await manager.downloadModel(onProgress: (p) => progresses.add(p.progress));
 
+    expect(requestedUris.single.host, 'china-cdn.example');
+    expect(requestedUris.single.path, '/model/tts/test.tar.gz');
     expect(await manager.isModelDownloaded(), isTrue);
     final paths = await manager.kokoroConfigPaths();
     expect(File(paths.model).existsSync(), isTrue);
@@ -156,6 +193,36 @@ void main() {
     expect(p.basename(paths.dataDir), 'espeak-ng-data');
     // 进度应抵达 1.0。
     expect(progresses.last, 1.0);
+  });
+
+  test('官方直链不被区域 CDN 替换', () async {
+    final requestedUris = <Uri>[];
+    final manager = _manager(
+      root,
+      _buildArchive(),
+      downloadUrl: 'https://official.example/release/test.tar.gz',
+      endpointRouter: await _routerWithChinaCdn(),
+      requestUris: requestedUris,
+    );
+    await manager.downloadModel();
+    expect(
+      requestedUris.single.toString(),
+      'https://official.example/release/test.tar.gz',
+    );
+    expect(await manager.isModelDownloaded(), isTrue);
+  });
+
+  test('显式覆盖地址优先于官方直链', () async {
+    final requestedUris = <Uri>[];
+    final manager = _manager(
+      root,
+      _buildArchive(),
+      downloadUrl: 'https://official.example/release/test.tar.gz',
+      requestUris: requestedUris,
+    );
+    await manager.downloadModel();
+    expect(requestedUris.single.host, 'mock.local');
+    expect(await manager.isModelDownloaded(), isTrue);
   });
 
   test('归档 SHA-256 不匹配 → 抛错且模型未安装', () async {

@@ -20,15 +20,14 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../analytics/analytics_providers.dart';
 import '../analytics/analytics_service.dart';
 import '../analytics/permission_snapshot.dart';
-import '../config/api_config.dart';
 import '../config/auth_config.dart' as auth_config;
 import '../config/paddle_config.dart' as paddle_config;
 import '../config/revenuecat_config.dart' as revenuecat_config;
 import '../database/app_database.dart';
-import '../database/migration/sp_to_drift_migration.dart';
 import '../database/providers.dart';
 import '../features/onboarding_survey/providers/onboarding_survey_provider.dart'
     show sharedPreferencesProvider;
+import '../features/user_region/user_region_providers.dart';
 import '../features/community_collections/download/community_download_notifier.dart';
 import '../firebase_options.dart';
 import '../services/app_logger.dart';
@@ -38,6 +37,7 @@ import '../services/bundled_example_installer.dart';
 import '../services/network_permission_trigger.dart';
 import '../services/speech_practice_platform.dart';
 import '../services/startup_trace.dart';
+import '../services/runtime_endpoint_router.dart';
 import '../services/temp_cleanup_service.dart';
 import '../services/tts/tts_cache_store.dart';
 import '../utils/app_data_dir.dart';
@@ -91,6 +91,33 @@ final startupBootstrapperProvider = Provider<StartupBootstrapper>((ref) {
   );
 });
 
+/// 等待本次启动的地区结论后，按该结果选择 Supabase URL。
+final supabaseUrlForThisRunProvider = FutureProvider<String?>((ref) async {
+  final userRegion = await ref.watch(userRegionBootstrapProvider.future);
+  final isChinaUser = userRegion.isChinaUser;
+  final selectedUrl = auth_config.supabaseUrlForRegion(
+    isChinaUser: isChinaUser,
+  );
+  final selectionReady = auth_config.isAuthConfiguredForUrl(selectedUrl);
+  final skipReason = selectedUrl == null
+      ? 'selected_url_missing'
+      : auth_config.supabasePublishableKey.trim().isEmpty
+      ? 'publishable_key_missing'
+      : null;
+  AppLogger.log(
+    'Supabase',
+    'url selection region=${isChinaUser ? "china" : "global"} '
+        'endpoint=${auth_config.supabaseEndpointLabelForLog(selectedUrl)} '
+        'globalUrlConfigured=${auth_config.supabaseUrl.trim().isNotEmpty} '
+        'chinaUrlConfigured=${auth_config.chinaSupabaseUrl.trim().isNotEmpty} '
+        'publishableKeyConfigured='
+        '${auth_config.supabasePublishableKey.trim().isNotEmpty} '
+        'action=${selectionReady ? "initialize" : "skip"}'
+        '${skipReason == null ? "" : " reason=$skipReason"}',
+  );
+  return selectedUrl;
+});
+
 /// 本地数据初始化状态。首次构建先等待首帧，再运行关键本地初始化。
 final localStartupProvider =
     AsyncNotifierProvider<LocalStartupController, StartupReport>(
@@ -101,8 +128,14 @@ final localStartupProvider =
 final thirdPartyStartupProvider = FutureProvider<ThirdPartyStartupReport>((
   ref,
 ) async {
-  await ref.watch(localStartupProvider.future);
-  return ref.read(startupBootstrapperProvider).initializeThirdParty();
+  final localStartup = ref.watch(localStartupProvider.future);
+  final userRegionBootstrap = ref.watch(userRegionBootstrapProvider.future);
+  final supabaseUrlFuture = ref.watch(supabaseUrlForThisRunProvider.future);
+  await Future.wait([localStartup, userRegionBootstrap]);
+  final supabaseUrl = await supabaseUrlFuture;
+  return ref
+      .read(startupBootstrapperProvider)
+      .initializeThirdParty(supabaseUrl: supabaseUrl);
 });
 
 class LocalStartupController extends AsyncNotifier<StartupReport> {
@@ -149,7 +182,9 @@ class LocalStartupController extends AsyncNotifier<StartupReport> {
 abstract class StartupBootstrapper {
   Future<StartupReport> initializeLocal();
 
-  Future<ThirdPartyStartupReport> initializeThirdParty();
+  Future<ThirdPartyStartupReport> initializeThirdParty({
+    required String? supabaseUrl,
+  });
 }
 
 /// 生产启动副作用编排器。关键本地步骤抛错，可降级步骤收集为报告。
@@ -175,18 +210,12 @@ class DefaultStartupBootstrapper implements StartupBootstrapper {
     final issues = <StartupIssue>[];
     await _configurePersistentLogs(issues);
 
-    // 显式打开数据库，确保 Drift schema upgrade 的异常不会被旧数据导入吞掉。
+    // 显式打开数据库，使 schema upgrade 失败进入本地初始化错误状态。
     await _trace('database_open_and_schema_check', () async {
       await _database.customSelect('SELECT 1').get();
     });
 
     if (!_isDemoMode) {
-      final migration = SpToDriftMigration(
-        _database,
-        _prefs,
-        subtitleLoader: defaultSubtitleLoader,
-      );
-      await _trace('shared_preferences_to_drift_migration', migration.migrate);
       await _runBestEffort(
         issues,
         'bundled_examples_install',
@@ -203,7 +232,9 @@ class DefaultStartupBootstrapper implements StartupBootstrapper {
 
   /// 执行不会阻断本地学习的 SDK 与维护任务，并保证正常结束。
   @override
-  Future<ThirdPartyStartupReport> initializeThirdParty() async {
+  Future<ThirdPartyStartupReport> initializeThirdParty({
+    required String? supabaseUrl,
+  }) async {
     final issues = <StartupIssue>[];
     await _runBestEffort(
       issues,
@@ -216,7 +247,12 @@ class DefaultStartupBootstrapper implements StartupBootstrapper {
         'detached_scheduled',
         fields: {'step': 'ios_network_permission_trigger'},
       );
-      unawaited(NetworkPermissionTrigger.trigger(_prefs, apiBaseUrl));
+      unawaited(
+        NetworkPermissionTrigger.trigger(
+          _prefs,
+          runtimeEndpointRouter.apiBaseUrl,
+        ),
+      );
     }
 
     var firebaseReady = false;
@@ -238,23 +274,54 @@ class DefaultStartupBootstrapper implements StartupBootstrapper {
 
     var supabaseReady = false;
     String? restoredUserId;
-    if (auth_config.isAuthConfigured) {
+    final selectedSupabaseUrl = supabaseUrl;
+    final supabaseEndpointLabel = auth_config.supabaseEndpointLabelForLog(
+      selectedSupabaseUrl,
+    );
+    if (selectedSupabaseUrl != null &&
+        auth_config.isAuthConfiguredForUrl(selectedSupabaseUrl)) {
+      AppLogger.log(
+        'Supabase',
+        'initialize start endpoint=$supabaseEndpointLabel',
+      );
       try {
         await _trace('supabase_initialize', () {
           return Supabase.initialize(
-            url: auth_config.supabaseUrl,
+            url: selectedSupabaseUrl,
             anonKey: auth_config.supabasePublishableKey,
           );
         });
         supabaseReady = true;
         restoredUserId = Supabase.instance.client.auth.currentSession?.user.id;
+        AppLogger.log(
+          'Supabase',
+          'initialize success endpoint=$supabaseEndpointLabel '
+              'sessionRestored=${restoredUserId != null}',
+        );
       } catch (error, stackTrace) {
+        AppLogger.log(
+          'Supabase',
+          'initialize failed endpoint=$supabaseEndpointLabel '
+              'errorType=${error.runtimeType}',
+        );
         _recordIssue(issues, 'supabase_initialize', error, stackTrace);
       }
     } else {
+      final skipReason = selectedSupabaseUrl == null
+          ? 'selected_url_missing'
+          : 'publishable_key_missing';
+      AppLogger.log(
+        'Supabase',
+        'initialize skipped endpoint=$supabaseEndpointLabel '
+            'reason=$skipReason',
+      );
       activeStartupTrace?.mark(
         'step_skipped',
-        fields: {'step': 'supabase_initialize', 'reason': 'not_configured'},
+        fields: {
+          'step': 'supabase_initialize',
+          'reason': skipReason,
+          'endpoint': supabaseEndpointLabel,
+        },
       );
     }
 

@@ -34,6 +34,7 @@ import '../analytics/models/event_names.dart';
 import '../config/app_store_config.dart';
 import '../features/auth/providers/auth_providers.dart';
 import '../features/auth/screens/account_screen.dart';
+import '../features/user_region/user_region_providers.dart';
 import '../features/subscription/providers/subscription_availability.dart';
 import '../features/subscription/providers/subscription_controller.dart';
 import '../services/app_update_launcher.dart';
@@ -63,7 +64,7 @@ import 'playback_settings_screen.dart';
 import 'preferences_viewer_screen.dart';
 import 'storage_browser_screen.dart';
 import 'reminder_settings_screen.dart';
-import '../config/api_config.dart';
+import '../services/runtime_endpoint_router.dart';
 import '../widgets/app_update_dialog.dart';
 
 const double _settingsLeadingIconExtent = 32;
@@ -138,6 +139,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 构建账号分组：登录入口 + 订阅入口（登录 item 下方）。
   Widget _buildAccountSection(BuildContext context, AppLocalizations l10n) {
     final session = ref.watch(supabaseSessionProvider).valueOrNull;
+    final isChinaUser = ref.watch(isChinaUserProvider);
     final isSignedIn = session != null;
     final accountSubtitle = session == null
         ? null
@@ -155,7 +157,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       title: l10n.account,
       children: [
         ListTile(
-          leading: _settingsThemedSvgIcon(context, 'assets/icon/account-1.svg'),
+          leading: _buildAccountLeadingIcon(
+            context,
+            l10n,
+            isChinaUser: isChinaUser,
+          ),
           title: Text(l10n.account),
           subtitle: accountSubtitle == null
               ? null
@@ -184,6 +190,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         if (ref.watch(subscriptionAvailabilityProvider))
           _buildSubscriptionTile(context, l10n),
       ],
+    );
+  }
+
+  /// 中国区路由启用时，在账号入口图标右上角显示地区标记。
+  Widget _buildAccountLeadingIcon(
+    BuildContext context,
+    AppLocalizations l10n, {
+    required bool isChinaUser,
+  }) {
+    final accountIcon = _settingsThemedSvgIcon(
+      context,
+      'assets/icon/account-1.svg',
+    );
+    if (!isChinaUser) return accountIcon;
+
+    return Tooltip(
+      message: l10n.chinaRoutingIndicatorTooltip,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          accountIcon,
+          Positioned(
+            top: 0,
+            right: 0,
+            child: ExcludeSemantics(
+              child: SvgPicture.asset(
+                'assets/icon/china_flag.svg',
+                width: 12,
+                height: 8,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -582,10 +622,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           leading: _settingsThemedSvgIcon(context, 'assets/icon/group.svg'),
           title: Text(l10n.aboutCommunity),
           trailing: const Icon(Icons.chevron_right),
-          onTap: () {
+          onTap: () async {
             final isZh = Localizations.localeOf(context).languageCode == 'zh';
             final path = isZh ? '/zh-CN/social' : '/en/social';
-            launchUrl(Uri.parse('$apiBaseUrl$path'));
+            final uri = runtimeEndpointRouter.apiUri(path);
+            await launchUrl(uri);
           },
         ),
         ListTile(

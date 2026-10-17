@@ -17,11 +17,11 @@ import '../models/learning_progress.dart';
 import '../models/reminder_settings.dart';
 import '../analytics/analytics_providers.dart';
 import '../analytics/models/event_names.dart';
-import '../config/api_config.dart';
+import '../services/runtime_endpoint_router.dart';
 import '../database/providers.dart';
 import '../features/podcast/podcast_refresh_controller.dart';
 import '../features/remote_config/remote_config_providers.dart';
-import '../features/user_region/user_region.dart';
+import '../features/user_region/user_region_bootstrapper.dart';
 import '../features/user_region/user_region_providers.dart';
 import '../providers/app_update_provider.dart';
 import '../providers/audio_library_provider.dart';
@@ -160,11 +160,12 @@ class _MainShellState extends ConsumerState<MainShell> with RouteAware {
   }
 
   /// 按社区入口的相同规则打开联系我们页面。
-  void _openContactUs() {
+  Future<void> _openContactUs() async {
     ref.read(analyticsServiceProvider).track(Events.communityInviteTapped);
     final isZh = Localizations.localeOf(context).languageCode == 'zh';
     final path = isZh ? '/zh-CN/social' : '/en/social';
-    unawaited(launchUrl(Uri.parse('$apiBaseUrl$path')));
+    final uri = runtimeEndpointRouter.apiUri(path);
+    await launchUrl(uri);
   }
 
   /// 预热学习页首屏所需数据：音频列表 + 学习进度。
@@ -201,7 +202,7 @@ class _MainShellState extends ConsumerState<MainShell> with RouteAware {
   void _startPostLocalTasks() {
     if (!mounted || _didStartPostLocalTasks) return;
     _didStartPostLocalTasks = true;
-    // AppUpdate 和 UserRegion 都会读取 storefront，必须晚于第三方 SDK 初始化。
+    // AppUpdate 读取 storefront，必须晚于第三方 SDK 初始化。
     unawaited(_startPostThirdPartyTasks());
   }
 
@@ -246,11 +247,12 @@ class _MainShellState extends ConsumerState<MainShell> with RouteAware {
       ref
           .read(notificationPermissionServiceProvider)
           .syncSystemAuthorizationStatus();
-      _remoteConfigController.startPeriodicRefresh(forceFirst: true);
-      unawaited(
-        ref
-            .read(userRegionProvider.notifier)
-            .refresh(UserRegionRefreshTrigger.startup),
+      final regionResult = ref.read(userRegionBootstrapProvider).valueOrNull;
+      final startupConfigResolved =
+          regionResult?.source == UserRegionDecisionSource.remoteConfig;
+      _remoteConfigController.startPeriodicRefresh(
+        forceFirst: !startupConfigResolved,
+        skipInitialRequest: startupConfigResolved,
       );
 
       AppLogger.log('StartupLoad', 'study bootstrap start');
@@ -580,18 +582,6 @@ class _MainShellState extends ConsumerState<MainShell> with RouteAware {
     }
     unawaited(_refreshSubscribedPodcastsInBackground());
     ref.read(remoteConfigProvider.notifier).startPeriodicRefresh();
-    if (ref.read(thirdPartyStartupProvider).hasValue) {
-      unawaited(
-        ref
-            .read(userRegionProvider.notifier)
-            .refresh(UserRegionRefreshTrigger.resume),
-      );
-    } else {
-      AppLogger.log(
-        'UserRegion',
-        'onAppResume skipped: third-party startup pending',
-      );
-    }
     // 回前台时同步系统通知权限状态，覆盖用户在系统设置中手动变更的情况
     unawaited(
       ref
